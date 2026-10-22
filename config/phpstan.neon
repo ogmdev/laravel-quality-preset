@@ -1,0 +1,11 @@
+# Include from the project's phpstan.neon:
+#
+#     includes:
+#         - vendor/ogmdev/laravel-quality-preset/config/phpstan.neon
+#
+# The baseline stays empty: a new error is fixed, not baselined. An ignored error or a baseline
+# entry that no longer matches fails the analysis, so neither outlives the code it covered.
+parameters:
+    level: 7
+    reportUnmatchedIgnoredErrors: true
+    tmpDir: %currentWorkingDirectory%/storage/larastanCache

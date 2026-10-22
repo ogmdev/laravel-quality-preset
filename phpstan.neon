@@ -1,0 +1,11 @@
+includes:
+    - config/phpstan.neon
+
+parameters:
+    paths:
+        - src
+        - tests
+        - bin/assert-no-critical-vulnerability
+        - bin/check-licenses
+        - rector.php
+    tmpDir: .phpstan.cache

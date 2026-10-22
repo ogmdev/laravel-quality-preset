@@ -1,0 +1,129 @@
+#!/usr/bin/env node
+
+// Fails when a @vite, Vite::asset or Vite::content call in the PHP sources names a file that
+// the Vite build left out of its manifest: Laravel would answer that page with a 500.
+//
+// Run it from the project root, after the Vite build.
+// Usage: assert-vite-references-are-built [options]
+//   --manifest=<path>   Vite manifest to check against (default: public/build/manifest.json)
+//   --scan=<dir,...>    directories whose .php files are scanned (default: app,resources)
+
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
+
+const CALL_PATTERN = /(@vite|Vite::(?:asset|content))\s*\(/g;
+const LITERAL_PATTERN = /'([^'\\]*)'|"([^"\\$]*)"/g;
+const LITERALS_ONLY_PATTERN = /^\s*\[?\s*(?:(?:'[^'\\]*'|"[^"\\$]*")\s*,?\s*)+\]?\s*$/;
+
+function fail(lines) {
+    console.error(lines.join('\n'));
+    process.exit(1);
+}
+
+function options(argumentList) {
+    const parsed = { manifest: 'public/build/manifest.json', scan: ['app', 'resources'] };
+
+    for (const argument of argumentList) {
+        const [name, value] = argument.split(/=(.*)/s);
+        if (value === undefined || value === '') {
+            fail([`Unknown option or missing value: [${argument}].`]);
+        } else if (name === '--manifest') {
+            parsed.manifest = value;
+        } else if (name === '--scan') {
+            parsed.scan = value.split(',').map((directory) => directory.trim()).filter((directory) => directory !== '');
+        } else {
+            fail([`Unknown option [${name}].`]);
+        }
+    }
+
+    return parsed;
+}
+
+function phpFilesUnder(directory) {
+    return readdirSync(directory, { withFileTypes: true }).flatMap((dirent) => {
+        const path = join(directory, dirent.name);
+        if (dirent.isDirectory()) {
+            return phpFilesUnder(path);
+        }
+        return dirent.name.endsWith('.php') ? [path] : [];
+    });
+}
+
+function argumentsFrom(source, openIndex) {
+    let depth = 1;
+    for (let index = openIndex; index < source.length; index++) {
+        if (source[index] === '(') {
+            depth++;
+        } else if (source[index] === ')') {
+            depth--;
+            if (depth === 0) {
+                return source.slice(openIndex, index);
+            }
+        }
+    }
+    return source.slice(openIndex);
+}
+
+function lineOf(source, index) {
+    return source.slice(0, index).split('\n').length;
+}
+
+const projectRoot = process.cwd();
+const { manifest: manifestOption, scan } = options(process.argv.slice(2));
+const manifestPath = resolve(projectRoot, manifestOption);
+
+if (!existsSync(manifestPath)) {
+    fail([`${relative(projectRoot, manifestPath)} not found: run this check after the Vite build.`]);
+}
+
+const missingRoots = scan.filter((root) => !existsSync(join(projectRoot, root)));
+if (missingRoots.length > 0) {
+    fail([`Scanned directory not found: ${missingRoots.join(', ')}. Pass the existing ones with --scan.`]);
+}
+
+const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+const references = [];
+const unverifiable = [];
+
+for (const file of scan.flatMap((root) => phpFilesUnder(join(projectRoot, root)))) {
+    const source = readFileSync(file, 'utf8');
+    for (const call of source.matchAll(CALL_PATTERN)) {
+        const location = `${relative(projectRoot, file)}:${lineOf(source, call.index)}`;
+        const callArguments = argumentsFrom(source, call.index + call[0].length);
+        if (!LITERALS_ONLY_PATTERN.test(callArguments)) {
+            unverifiable.push(`${location} ${call[1]}(${callArguments.trim()})`);
+            continue;
+        }
+        for (const literal of callArguments.matchAll(LITERAL_PATTERN)) {
+            references.push({ location, path: literal[1] ?? literal[2] });
+        }
+    }
+}
+
+const missing = references.filter((reference) => manifest[reference.path] === undefined);
+
+if (unverifiable.length > 0) {
+    console.error(`${unverifiable.length} Vite call(s) whose argument is not a hard-coded path:`);
+    for (const call of unverifiable) {
+        console.error(`  - ${call}`);
+    }
+    console.error('');
+    console.error('This check cannot match such a call against the manifest, nor a second argument');
+    console.error('that would switch to another build directory: write each path literally.');
+}
+
+if (missing.length > 0) {
+    console.error(`${missing.length} Vite reference(s) missing from the build manifest:`);
+    for (const reference of missing) {
+        console.error(`  - ${reference.location} → ${reference.path}`);
+    }
+    console.error('');
+    console.error('At render time Laravel throws "Unable to locate file in Vite manifest" and the page answers 500.');
+    console.error('Fix the path, or make the file part of the build (a Vite input, or an import from one).');
+}
+
+if (unverifiable.length > 0 || missing.length > 0) {
+    process.exit(1);
+}
+
+console.log(`Vite references: ${references.length} hard-coded reference(s), all present in the build manifest.`);

@@ -1,0 +1,58 @@
+{
+    "name": "ogmdev/laravel-quality-preset",
+    "description": "Shared quality tooling for Laravel applications: a PHPStan base config, a Rector config factory, a Pint preset and CI gates for licenses, vulnerabilities and Vite references.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": ["laravel", "phpstan", "rector", "pint", "quality", "ci", "licenses", "osv-scanner", "vite"],
+    "authors": [
+        {
+            "name": "Olivier Grandmougin"
+        }
+    ],
+    "require": {
+        "php": "^8.4",
+        "driftingly/rector-laravel": "^2.1",
+        "laravel/pint": "^1.22",
+        "phpstan/phpstan": "^2.1",
+        "rector/rector": "^2.2"
+    },
+    "require-dev": {
+        "pestphp/pest": "^5.0",
+        "pestphp/pest-plugin-phpstan": "^5.0",
+        "phpstan/extension-installer": "^1.4"
+    },
+    "suggest": {
+        "larastan/larastan": "Laravel-aware PHPStan rules, loaded through phpstan/extension-installer",
+        "phpstan/extension-installer": "Registers larastan and the other PHPStan extensions without editing the config"
+    },
+    "autoload": {
+        "psr-4": {
+            "Ogmdev\\LaravelQualityPreset\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Ogmdev\\LaravelQualityPreset\\Tests\\": "tests/"
+        }
+    },
+    "bin": [
+        "bin/assert-no-critical-vulnerability",
+        "bin/assert-vite-references-are-built",
+        "bin/check-licenses"
+    ],
+    "scripts": {
+        "test": "pest",
+        "phpstan": "phpstan analyse --memory-limit=512M --no-progress",
+        "pint": "pint --config config/pint.json --test src tests rector.php bin/assert-no-critical-vulnerability bin/check-licenses",
+        "rector": "rector process --dry-run --no-progress-bar"
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true,
+            "phpstan/extension-installer": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

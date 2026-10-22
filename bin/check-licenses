@@ -1,0 +1,191 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+ * Fails when a Composer or npm dependency of the project in the current directory carries
+ * a license outside the allowlist, and prints each one.
+ *
+ * Usage: check-licenses [options]
+ *   --allow=<SPDX,...>           licenses allowed everywhere (replaces the default list)
+ *   --allow-dev=<SPDX,...>       licenses allowed for dev dependencies only (replaces the default list)
+ *   --ignore-vendor=<prefix>     skip packages whose name starts with this prefix, e.g. acme/ (repeatable)
+ *   --exception=<name>:<reason>  accept one package outside the allowlist, with the reason (repeatable)
+ *   --npm-lock=<path>            npm lockfile to read (default: package-lock.json)
+ *   --no-npm                     check the Composer dependencies only
+ */
+const DEFAULT_ALLOWED_LICENSES = ['MIT', 'BSD-2-Clause', 'BSD-3-Clause', 'Apache-2.0', 'ISC', '0BSD', 'BlueOak-1.0.0', 'CC0-1.0', 'MIT-0'];
+
+const DEFAULT_DEV_ONLY_LICENSES = ['MPL-2.0'];
+
+/**
+ * @param  list<string>  $lines
+ */
+function fail(array $lines): never
+{
+    fwrite(STDERR, implode(PHP_EOL, $lines).PHP_EOL);
+    exit(1);
+}
+
+/**
+ * @param  list<string>  $arguments
+ * @return array{allowed: list<string>, devOnly: list<string>, ignoredVendors: list<string>, exceptions: array<string, string>, npmLock: ?string}
+ */
+function options(array $arguments): array
+{
+    $options = [
+        'allowed' => DEFAULT_ALLOWED_LICENSES,
+        'devOnly' => DEFAULT_DEV_ONLY_LICENSES,
+        'ignoredVendors' => [],
+        'exceptions' => [],
+        'npmLock' => 'package-lock.json',
+    ];
+
+    foreach ($arguments as $argument) {
+        [$name, $value] = str_contains($argument, '=') ? explode('=', $argument, 2) : [$argument, null];
+
+        if ($name === '--no-npm' && $value === null) {
+            $options['npmLock'] = null;
+
+            continue;
+        }
+
+        if ($value === null || $value === '') {
+            fail([sprintf('Unknown option or missing value: [%s].', $argument)]);
+        }
+
+        match ($name) {
+            '--allow' => $options['allowed'] = spdxList($value),
+            '--allow-dev' => $options['devOnly'] = spdxList($value),
+            '--ignore-vendor' => $options['ignoredVendors'][] = $value,
+            '--exception' => $options['exceptions'] = [...$options['exceptions'], ...exception($value)],
+            '--npm-lock' => $options['npmLock'] = $value,
+            default => fail([sprintf('Unknown option [%s].', $name)]),
+        };
+    }
+
+    return $options;
+}
+
+/**
+ * @return list<string>
+ */
+function spdxList(string $value): array
+{
+    return array_values(array_filter(array_map(trim(...), explode(',', $value)), static fn (string $license): bool => $license !== ''));
+}
+
+/**
+ * @return array<string, string>
+ */
+function exception(string $value): array
+{
+    [$name, $reason] = array_map(trim(...), explode(':', $value, 2)) + [1 => ''];
+
+    if ($name === '' || $reason === '') {
+        fail([sprintf('Exception [%s] needs a package name and a reason: --exception=<name>:<reason>.', $value)]);
+    }
+
+    return [$name => $reason];
+}
+
+/**
+ * @return array<string, array{version: string, license: list<string>}>
+ */
+function composerDependencies(string ...$flags): array
+{
+    // Composer exports its own path to the scripts it runs.
+    $composer = getenv('COMPOSER_BINARY') ?: 'composer';
+    $command = implode(' ', array_map(escapeshellarg(...), [$composer, 'licenses', '--format=json', ...$flags]));
+
+    exec($command, $output, $exitCode);
+
+    if ($exitCode !== 0) {
+        fail([sprintf('[%s] exited with code %d.', $command, $exitCode)]);
+    }
+
+    try {
+        $licenses = json_decode(implode(PHP_EOL, $output), true, 512, JSON_THROW_ON_ERROR);
+    } catch (JsonException $jsonException) {
+        fail([sprintf('[%s] did not print JSON: %s', $command, $jsonException->getMessage())]);
+    }
+
+    return $licenses['dependencies'] ?? [];
+}
+
+/**
+ * @return list<string>
+ */
+function spdxAlternatives(mixed $expression): array
+{
+    return is_string($expression) ? array_map(trim(...), explode(' OR ', trim($expression, '() '))) : [];
+}
+
+/**
+ * @param  list<string>  $licenses
+ * @param  list<string>  $allowed
+ */
+function isAllowed(array $licenses, array $allowed): bool
+{
+    return array_any($licenses, static fn (string $license): bool => in_array($license, $allowed, true));
+}
+
+$options = options(array_values(array_filter(array_slice($_SERVER['argv'], 1), is_string(...))));
+$packages = [];
+$production = composerDependencies('--no-dev');
+
+foreach (composerDependencies() as $name => $package) {
+    $packages[] = ['composer', $name, $package['version'], $package['license'], ! array_key_exists($name, $production)];
+}
+
+if ($options['npmLock'] !== null) {
+    if (! is_file($options['npmLock'])) {
+        fail([sprintf('npm lockfile [%s] not found: pass --npm-lock=<path>, or --no-npm when the project has no npm dependencies.', $options['npmLock'])]);
+    }
+
+    try {
+        $lock = json_decode((string) file_get_contents($options['npmLock']), true, 512, JSON_THROW_ON_ERROR);
+    } catch (JsonException $jsonException) {
+        fail([sprintf('npm lockfile [%s] is not valid JSON: %s', $options['npmLock'], $jsonException->getMessage())]);
+    }
+
+    foreach ($lock['packages'] ?? [] as $path => $package) {
+        if ($path !== '') {
+            $name = substr($path, strrpos($path, 'node_modules/') + strlen('node_modules/'));
+            $packages[] = ['npm', $name, $package['version'] ?? '?', spdxAlternatives($package['license'] ?? null), $package['dev'] ?? false];
+        }
+    }
+}
+
+$violations = [];
+$exceptions = [];
+
+foreach ($packages as [$ecosystem, $name, $version, $licenses, $dev]) {
+    $allowed = $dev ? [...$options['allowed'], ...$options['devOnly']] : $options['allowed'];
+    $ignored = array_any($options['ignoredVendors'], static fn (string $prefix): bool => str_starts_with($name, $prefix));
+
+    if ($ignored || isAllowed($licenses, $allowed)) {
+        continue;
+    }
+
+    $line = sprintf('%s %s@%s: %s (%s)', $ecosystem, $name, $version, implode(' OR ', $licenses) ?: 'unknown', $dev ? 'dev' : 'prod');
+
+    if (array_key_exists($name, $options['exceptions'])) {
+        $exceptions[$name] = sprintf('Exception for %s, %s', $line, $options['exceptions'][$name]);
+    } else {
+        $violations[] = $line;
+    }
+}
+
+foreach (array_keys(array_diff_key($options['exceptions'], $exceptions)) as $name) {
+    $violations[] = sprintf('Unused exception for %s: remove its --exception option', $name);
+}
+
+$lines = [sprintf('%d packages checked.', count($packages)), ...array_values($exceptions)];
+
+if ($violations !== []) {
+    fail([...$lines, 'Licenses outside the allowlist:', ...$violations]);
+}
+
+echo implode(PHP_EOL, $lines).PHP_EOL;
