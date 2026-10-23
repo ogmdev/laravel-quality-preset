@@ -149,4 +149,4 @@ The Vite tests need Node.js, and are skipped without it. `NODE_BINARY` points th
 
 ## License
 
-MIT
+Apache License 2.0, see [LICENSE](LICENSE).

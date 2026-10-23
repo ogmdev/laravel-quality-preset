@@ -2,7 +2,7 @@
     "name": "ogmdev/laravel-quality-preset",
     "description": "Shared quality tooling for Laravel applications: a PHPStan base config, a Rector config factory, a Pint preset and CI gates for licenses, vulnerabilities and Vite references.",
     "type": "library",
-    "license": "MIT",
+    "license": "Apache-2.0",
     "keywords": ["laravel", "phpstan", "rector", "pint", "quality", "ci", "licenses", "osv-scanner", "vite"],
     "authors": [
         {
