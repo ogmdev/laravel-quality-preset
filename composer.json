@@ -4,11 +4,6 @@
     "type": "library",
     "license": "Apache-2.0",
     "keywords": ["laravel", "phpstan", "rector", "pint", "quality", "ci", "licenses", "osv-scanner", "vite"],
-    "authors": [
-        {
-            "name": "Olivier Grandmougin"
-        }
-    ],
     "require": {
         "php": "^8.4",
         "driftingly/rector-laravel": "^2.1",
