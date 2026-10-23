@@ -6,19 +6,20 @@ declare(strict_types=1);
  * @param  list<string>  $ignoreErrors
  * @return array{exitCode: int, stdout: string, stderr: string}
  */
-function phpstanAnalyse(string $project, array $ignoreErrors = []): array
+function phpstanAnalyse(string $project, array $ignoreErrors = [], ?string $workingDirectory = null): array
 {
+    // Installed where Composer puts it, as tmpDir is relative to the config file.
+    writeFile($project.'/vendor/ogmdev/laravel-quality-preset/config/phpstan.neon', (string) file_get_contents(packagePath('config/phpstan.neon')));
     $ignored = implode('', array_map(static fn (string $pattern): string => sprintf("        - '#%s#'\n", $pattern), $ignoreErrors));
 
     writeFile($project.'/phpstan.neon', sprintf(
-        "includes:\n    - %s\n\nparameters:\n    paths:\n        - app\n%s",
-        packagePath('config/phpstan.neon'),
+        "includes:\n    - vendor/ogmdev/laravel-quality-preset/config/phpstan.neon\n\nparameters:\n    paths:\n        - app\n%s",
         $ignored === '' ? '' : "    ignoreErrors:\n".$ignored,
     ));
 
     return run(
-        [PHP_BINARY, packagePath('vendor/bin/phpstan'), 'analyse', '--no-progress', '--error-format=raw', '--memory-limit=512M'],
-        $project,
+        [PHP_BINARY, packagePath('vendor/bin/phpstan'), 'analyse', '--configuration='.$project.'/phpstan.neon', '--no-progress', '--error-format=raw', '--memory-limit=512M'],
+        $workingDirectory ?? $project,
     );
 }
 
@@ -67,8 +68,12 @@ it('reports an ignored error that no longer matches', function (): void {
         ->not->toContain('expects int, int|string given');
 });
 
-it('keeps its cache in the project storage', function (): void {
-    phpstanAnalyse($this->project);
+it('keeps its cache in the project storage, whatever directory it runs from', function (): void {
+    mkdir($this->project.'/app/Http', 0777, true);
 
-    expect($this->project.'/storage/larastanCache')->toBeDirectory();
+    $result = phpstanAnalyse($this->project, workingDirectory: $this->project.'/app/Http');
+
+    expect($result['stdout'])->toContain('expects int, int|string given')
+        ->and($this->project.'/storage/larastanCache')->toBeDirectory()
+        ->and($this->project.'/app/Http/storage')->not->toBeDirectory();
 });

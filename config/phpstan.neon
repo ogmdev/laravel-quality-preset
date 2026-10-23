@@ -5,7 +5,10 @@
 #
 # The baseline stays empty: a new error is fixed, not baselined. An ignored error or a baseline
 # entry that no longer matches fails the analysis, so neither outlives the code it covered.
+#
+# tmpDir is relative to this file, installed in vendor/ogmdev/laravel-quality-preset/config: the
+# cache lands in the project's storage/ whatever directory PHPStan runs from.
 parameters:
     level: 7
     reportUnmatchedIgnoredErrors: true
-    tmpDir: %currentWorkingDirectory%/storage/larastanCache
+    tmpDir: ../../../../storage/larastanCache

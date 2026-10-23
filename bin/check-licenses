@@ -5,7 +5,8 @@ declare(strict_types=1);
 
 /**
  * Fails when a Composer or npm dependency of the project in the current directory carries
- * a license outside the allowlist, and prints each one.
+ * a license outside the allowlist, and prints each one. It reads the installed Composer
+ * packages from vendor/composer/installed.json, so run it after composer install.
  *
  * Usage: check-licenses [options]
  *   --allow=<SPDX,...>           licenses allowed everywhere (replaces the default list)
@@ -91,52 +92,152 @@ function exception(string $value): array
 }
 
 /**
- * @return array<string, array{version: string, license: list<string>}>
+ * @return list<array{name: string, version: string, license: list<string>, dev: bool}>
  */
-function composerDependencies(string ...$flags): array
+function composerDependencies(): array
 {
-    // Composer exports its own path to the scripts it runs.
-    $composer = getenv('COMPOSER_BINARY') ?: 'composer';
-    $command = implode(' ', array_map(escapeshellarg(...), [$composer, 'licenses', '--format=json', ...$flags]));
+    $composerJson = is_file('composer.json') ? json_decode((string) file_get_contents('composer.json'), true) : null;
+    $vendorDirectory = getenv('COMPOSER_VENDOR_DIR') ?: ($composerJson['config']['vendor-dir'] ?? 'vendor');
+    $installedPath = $vendorDirectory.'/composer/installed.json';
 
-    exec($command, $output, $exitCode);
-
-    if ($exitCode !== 0) {
-        fail([sprintf('[%s] exited with code %d.', $command, $exitCode)]);
+    if (! is_file($installedPath)) {
+        fail([sprintf('[%s] not found: run composer install before this check.', $installedPath)]);
     }
 
     try {
-        $licenses = json_decode(implode(PHP_EOL, $output), true, 512, JSON_THROW_ON_ERROR);
+        $installed = json_decode((string) file_get_contents($installedPath), true, 512, JSON_THROW_ON_ERROR);
     } catch (JsonException $jsonException) {
-        fail([sprintf('[%s] did not print JSON: %s', $command, $jsonException->getMessage())]);
+        fail([sprintf('[%s] is not valid JSON: %s', $installedPath, $jsonException->getMessage())]);
     }
 
-    return $licenses['dependencies'] ?? [];
+    if (! is_array($installed) || ! is_array($installed['packages'] ?? null)) {
+        fail([sprintf('[%s] has no "packages" key: install the dependencies with Composer 2.', $installedPath)]);
+    }
+
+    $devPackageNames = $installed['dev-package-names'] ?? [];
+    $packages = [];
+
+    foreach ($installed['packages'] as $package) {
+        $name = (string) ($package['name'] ?? '?');
+        $packages[] = [
+            'name' => $name,
+            'version' => (string) ($package['version'] ?? '?'),
+            'license' => array_values(array_filter((array) ($package['license'] ?? []), is_string(...))),
+            'dev' => in_array($name, $devPackageNames, true),
+        ];
+    }
+
+    return $packages;
 }
 
 /**
- * @return list<string>
- */
-function spdxAlternatives(mixed $expression): array
-{
-    return is_string($expression) ? array_map(trim(...), explode(' OR ', trim($expression, '() '))) : [];
-}
-
-/**
- * @param  list<string>  $licenses
+ * Whether the SPDX expression holds with the allowed licenses alone: one side of an OR, both
+ * sides of an AND. "X WITH exception" counts as X, since an exception only adds rights. An
+ * expression it cannot parse is not allowed.
+ *
  * @param  list<string>  $allowed
  */
-function isAllowed(array $licenses, array $allowed): bool
+function isAllowedExpression(string $expression, array $allowed): bool
 {
-    return array_any($licenses, static fn (string $license): bool => in_array($license, $allowed, true));
+    preg_match_all('/[()]|[^\s()]+/', $expression, $matches);
+    $tokens = $matches[0];
+    $position = 0;
+
+    try {
+        $holds = spdxOr($tokens, $position, $allowed);
+    } catch (UnexpectedValueException) {
+        return false;
+    }
+
+    return $position === count($tokens) && $holds;
+}
+
+/**
+ * @param  list<string>  $tokens
+ * @param  list<string>  $allowed
+ */
+function spdxOr(array $tokens, int &$position, array $allowed): bool
+{
+    $holds = spdxAnd($tokens, $position, $allowed);
+
+    while (strtoupper($tokens[$position] ?? '') === 'OR') {
+        $position++;
+        $holds = spdxAnd($tokens, $position, $allowed) || $holds;
+    }
+
+    return $holds;
+}
+
+/**
+ * @param  list<string>  $tokens
+ * @param  list<string>  $allowed
+ */
+function spdxAnd(array $tokens, int &$position, array $allowed): bool
+{
+    $holds = spdxTerm($tokens, $position, $allowed);
+
+    while (strtoupper($tokens[$position] ?? '') === 'AND') {
+        $position++;
+        $holds = spdxTerm($tokens, $position, $allowed) && $holds;
+    }
+
+    return $holds;
+}
+
+/**
+ * @param  list<string>  $tokens
+ * @param  list<string>  $allowed
+ */
+function spdxTerm(array $tokens, int &$position, array $allowed): bool
+{
+    $token = $tokens[$position++] ?? throw new UnexpectedValueException('Unexpected end of expression.');
+
+    if ($token === '(') {
+        $holds = spdxOr($tokens, $position, $allowed);
+
+        if (($tokens[$position++] ?? null) !== ')') {
+            throw new UnexpectedValueException('Unbalanced parenthesis.');
+        }
+    } elseif (isSpdxOperator($token)) {
+        throw new UnexpectedValueException(sprintf('Unexpected [%s].', $token));
+    } else {
+        $holds = in_array($token, $allowed, true);
+    }
+
+    if (strtoupper($tokens[$position] ?? '') === 'WITH') {
+        $exception = $tokens[$position + 1] ?? ')';
+
+        if (isSpdxOperator($exception)) {
+            throw new UnexpectedValueException('WITH needs an exception.');
+        }
+
+        $position += 2;
+    }
+
+    return $holds;
+}
+
+function isSpdxOperator(string $token): bool
+{
+    return in_array(strtoupper($token), ['(', ')', 'AND', 'OR', 'WITH'], true);
+}
+
+/**
+ * Composer lists the alternative licenses of a package; npm gives one SPDX expression.
+ *
+ * @param  list<string>  $expressions
+ * @param  list<string>  $allowed
+ */
+function isAllowed(array $expressions, array $allowed): bool
+{
+    return array_any($expressions, static fn (string $expression): bool => isAllowedExpression($expression, $allowed));
 }
 
 $options = options(array_values(array_filter(array_slice($_SERVER['argv'], 1), is_string(...))));
 $packages = [];
-$production = composerDependencies('--no-dev');
 
-foreach (composerDependencies() as $name => $package) {
-    $packages[] = ['composer', $name, $package['version'], $package['license'], ! array_key_exists($name, $production)];
+foreach (composerDependencies() as $package) {
+    $packages[] = ['composer', $package['name'], $package['version'], $package['license'], $package['dev']];
 }
 
 if ($options['npmLock'] !== null) {
@@ -150,11 +251,21 @@ if ($options['npmLock'] !== null) {
         fail([sprintf('npm lockfile [%s] is not valid JSON: %s', $options['npmLock'], $jsonException->getMessage())]);
     }
 
-    foreach ($lock['packages'] ?? [] as $path => $package) {
-        if ($path !== '') {
-            $name = substr($path, strrpos($path, 'node_modules/') + strlen('node_modules/'));
-            $packages[] = ['npm', $name, $package['version'] ?? '?', spdxAlternatives($package['license'] ?? null), $package['dev'] ?? false];
+    if (! is_array($lock) || ! is_array($lock['packages'] ?? null)) {
+        fail([sprintf('npm lockfile [%s] has no "packages" key: lockfileVersion 1 is not supported, regenerate it with npm 7 or later.', $options['npmLock'])]);
+    }
+
+    foreach ($lock['packages'] as $path => $package) {
+        // The root project, and the links npm places for workspaces: their target has an entry of its own.
+        if ($path === '' || ($package['link'] ?? false)) {
+            continue;
         }
+
+        // A workspace lives outside node_modules, and an aliased package names its real package.
+        $offset = strrpos($path, 'node_modules/');
+        $name = $package['name'] ?? ($offset === false ? $path : substr($path, $offset + strlen('node_modules/')));
+        $license = $package['license'] ?? null;
+        $packages[] = ['npm', $name, $package['version'] ?? '?', is_string($license) ? [$license] : [], $package['dev'] ?? false];
     }
 }
 

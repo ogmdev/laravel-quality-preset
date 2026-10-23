@@ -41,7 +41,7 @@ The base config sets:
 
 - `level: 7`;
 - `reportUnmatchedIgnoredErrors: true`, so an ignored error or a baseline entry that no longer matches fails the analysis;
-- `tmpDir` to `storage/larastanCache` in the directory PHPStan runs from.
+- `tmpDir` to the project's `storage/larastanCache`, whatever directory PHPStan runs from. The path is relative to the installed config, so it expects the default `vendor` directory.
 
 The baseline policy is to keep none: a new error is fixed, not baselined.
 
@@ -75,13 +75,16 @@ The preset:
 - applies the PHP sets of the `php` constraint in `composer.json`;
 - applies the Laravel upgrade rules of the installed `laravel/framework` version and the PHPUnit rules of the installed PHPUnit version (`withComposerBased()`);
 - applies the prepared sets `deadCode`, `codeQuality`, `codingStyle`, `typeDeclarations`, `phpunitCodeQuality` and `symfonyCodeQuality`;
-- applies the Laravel sets for code quality, collections, container strings, Eloquent magic methods and legacy factories, plus the Livewire 3 and 4 sets;
+- applies the Laravel sets for code quality, collections, container strings, Eloquent magic methods and legacy factories;
+- applies the Livewire upgrade sets up to the installed `livewire/livewire` major version: none without Livewire, the Livewire 3 set on Livewire 3, both sets on Livewire 4;
 - skips `CarbonToDateFacadeRector`, `DispatchToHelperFunctionsRector`, `NowFuncWithStartOfDayMethodCallToTodayFuncRector`, `StrictArraySearchRector` and `bootstrap/cache`;
 - caches in `storage/rectorCache`;
 - imports names and removes unused imports, but leaves docblocks and global short classes alone;
 - runs 3 processes in parallel. Pass `parallelProcesses:` to change that, or chain `->withoutParallel()`.
 
 `withSkip()` adds to the preset's skips; it does not replace them.
+
+Rector reads `composer.json` and `vendor/composer/installed.json` from the working directory, so the preset refuses to run from anywhere but the project root it was given.
 
 ## Pint
 
@@ -101,7 +104,9 @@ Each one runs from the project root, prints what it checked, and exits non-zero 
 vendor/bin/check-licenses --ignore-vendor=acme/ --ignore-vendor=@acme/
 ```
 
-It reads `composer licenses` and `package-lock.json`, and fails on any dependency whose licenses are all outside the allowlist. A package under several licenses (`MIT OR GPL-2.0`) passes when one of them is allowed.
+It reads the installed Composer packages from `vendor/composer/installed.json`, so it runs after `composer install`, and the npm packages from `package-lock.json` (lockfileVersion 2 or later; workspace members included). It fails on any dependency whose license is outside the allowlist.
+
+Licenses are read as SPDX expressions: `MIT OR GPL-2.0` passes when one side is allowed, `MIT AND Zlib` only when both are, and `Apache-2.0 WITH LLVM-exception` counts as `Apache-2.0`. An expression it cannot parse fails.
 
 | Option | Effect |
 |---|---|
@@ -119,7 +124,12 @@ osv-scanner scan source --recursive --format=json --output-file=osv-results.json
 vendor/bin/assert-no-critical-vulnerability osv-results.json
 ```
 
-It lists every vulnerability group of an [osv-scanner](https://github.com/google/osv-scanner) JSON report by CVSS base score, and fails when one reaches the threshold: 9.0, the CVSS "critical" rating, unless `--threshold=<score>` says otherwise. It also fails when the report is missing or its format changed, rather than stop blocking unnoticed.
+It lists every vulnerability group of an [osv-scanner](https://github.com/google/osv-scanner) JSON report by CVSS base score, and fails when one reaches the threshold: 9.0, the CVSS "critical" rating. A group without a CVSS score, such as a malicious package advisory, fails too, since the gate cannot rule it out. It also fails when the report is missing or its format changed, rather than stop blocking unnoticed.
+
+| Option | Effect |
+|---|---|
+| `--threshold=<score>` | Lowest CVSS base score that fails. Default: `9.0`. |
+| `--allow-unscored` | Lists the groups without a CVSS score instead of failing on them. |
 
 ### assert-vite-references-are-built
 
@@ -128,7 +138,9 @@ npm run build
 vendor/bin/assert-vite-references-are-built
 ```
 
-A Node.js script. It scans the `.php` files, Blade views included, for `@vite(...)`, `Vite::asset(...)` and `Vite::content(...)`, and fails when one names a file missing from the build manifest. Laravel would otherwise throw "Unable to locate file in Vite manifest" and answer that page with a 500. A call whose argument is not a hard-coded path fails too, since the gate cannot check it.
+A Node.js script. It scans the `.php` files, Blade views included, for `@vite(...)`, `Vite::asset(...)` and `Vite::content(...)`, and fails when one names a file missing from the build manifest. Laravel would otherwise throw "Unable to locate file in Vite manifest" and answer that page with a 500. A call whose argument is not a hard-coded path fails too, since the gate cannot check it. A literal second argument names another build directory, and its references are checked against that build's manifest, next to the default one.
+
+Calls that never run are left out: Blade comments, `@verbatim` blocks, escaped `@@vite` directives and PHP comments.
 
 | Option | Effect |
 |---|---|

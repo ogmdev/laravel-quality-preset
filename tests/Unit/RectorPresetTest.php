@@ -9,12 +9,28 @@ use Rector\DeadCode\Rector\ClassMethod\RemoveUnusedPrivateMethodRector;
 /**
  * @return array{exitCode: int, stdout: string, stderr: string}
  */
-function rectorDryRun(string $project): array
+function rectorDryRun(string $project, ?string $workingDirectory = null): array
 {
     return run(
         [PHP_BINARY, packagePath('vendor/bin/rector'), 'process', '--dry-run', '--output-format=json', '--config='.$project.'/rector.php'],
-        $project,
+        $workingDirectory ?? $project,
     );
+}
+
+/**
+ * @param  array<string, string>  $versions
+ */
+function installPackages(string $project, array $versions): void
+{
+    writeJson($project.'/vendor/composer/installed.json', [
+        'packages' => array_map(
+            static fn (string $name, string $version): array => ['name' => $name, 'version' => $version, 'version_normalized' => $version.'.0'],
+            array_keys($versions),
+            $versions,
+        ),
+        'dev' => true,
+        'dev-package-names' => [],
+    ]);
 }
 
 /**
@@ -57,7 +73,7 @@ beforeEach(function (): void {
     $this->project = temporaryDirectory('rector');
     writeJson($this->project.'/composer.json', ['require' => ['php' => '^8.4']]);
     // withComposerBased() reads the installed packages of the project.
-    writeJson($this->project.'/vendor/composer/installed.json', ['packages' => [], 'dev' => true, 'dev-package-names' => []]);
+    installPackages($this->project, []);
     writeRectorConfig($this->project, [StrictInArrayRector::class]);
 
     $catalog = <<<'PHP'
@@ -131,3 +147,35 @@ it('leaves the compiled bootstrap cache alone', function (): void {
     expect(rectorChanges($result))->toHaveKey('app/Catalog.php')
         ->not->toHaveKey('bootstrap/cache/Catalog.php');
 });
+
+it('refuses to run from outside the project root', function (): void {
+    $result = rectorDryRun($this->project, dirname($this->project));
+
+    expect($result['exitCode'])->not->toBe(0)
+        ->and(output($result))->toContain('Run Rector from the project root');
+});
+
+it('applies the Livewire upgrade sets up to the installed version', function (?string $livewire, bool $renamed): void {
+    installPackages($this->project, $livewire === null ? [] : ['livewire/livewire' => $livewire]);
+    writeFile($this->project.'/app/Counter.php', <<<'PHP'
+        <?php
+
+        declare(strict_types=1);
+
+        namespace App;
+
+        use Livewire\Volt\Component;
+
+        final class Counter extends Component
+        {
+        }
+        PHP);
+
+    $diff = rectorChanges(rectorDryRun($this->project))['app/Counter.php']['diff'] ?? '';
+
+    expect(str_contains($diff, '+use Livewire\Component;'))->toBe($renamed, $diff);
+})->with([
+    'no Livewire' => [null, false],
+    'Livewire 3' => ['3.6.4', false],
+    'Livewire 4' => ['4.0.1', true],
+]);

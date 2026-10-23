@@ -3,17 +3,23 @@
 // Fails when a @vite, Vite::asset or Vite::content call in the PHP sources names a file that
 // the Vite build left out of its manifest: Laravel would answer that page with a 500.
 //
+// Commented-out calls, @verbatim blocks and escaped @@vite directives are left out. A literal
+// second argument names another build directory, checked against the manifest of that build.
+//
 // Run it from the project root, after the Vite build.
 // Usage: assert-vite-references-are-built [options]
 //   --manifest=<path>   Vite manifest to check against (default: public/build/manifest.json)
 //   --scan=<dir,...>    directories whose .php files are scanned (default: app,resources)
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 
-const CALL_PATTERN = /(@vite|Vite::(?:asset|content))\s*\(/g;
+// Not preceded by @, which escapes a Blade directive, nor by a word character, as in MyVite::asset.
+const CALL_PATTERN = /(?<![\w@])(@vite|Vite::(?:asset|content))\s*\(/g;
 const LITERAL_PATTERN = /'([^'\\]*)'|"([^"\\$]*)"/g;
 const LITERALS_ONLY_PATTERN = /^\s*\[?\s*(?:(?:'[^'\\]*'|"[^"\\$]*")\s*,?\s*)+\]?\s*$/;
+const SINGLE_LITERAL_PATTERN = /^\s*(?:'([^'\\]*)'|"([^"\\$]*)")\s*$/;
+const BLADE_IGNORED_PATTERN = /\{\{--[\s\S]*?--\}\}|@verbatim\b[\s\S]*?@endverbatim/g;
 
 function fail(lines) {
     console.error(lines.join('\n'));
@@ -39,6 +45,80 @@ function options(argumentList) {
     return parsed;
 }
 
+function blank(text) {
+    return text.replace(/[^\n]/g, ' ');
+}
+
+// Blanks out what never renders, keeping every offset and line number: Blade comments and
+// @verbatim blocks in a view, comments in a PHP file.
+function withoutComments(source, isBlade) {
+    if (isBlade) {
+        return source.replace(BLADE_IGNORED_PATTERN, blank);
+    }
+
+    let result = '';
+    let index = 0;
+    while (index < source.length) {
+        const character = source[index];
+        if (character === "'" || character === '"') {
+            const end = stringEnd(source, index);
+            result += source.slice(index, end);
+            index = end;
+            continue;
+        }
+        const isLineComment = source.startsWith('//', index) || (character === '#' && source[index + 1] !== '[');
+        if (isLineComment || source.startsWith('/*', index)) {
+            const close = isLineComment ? /\n|\?>/g : /\*\//g;
+            close.lastIndex = index + 1;
+            const match = close.exec(source);
+            const end = match === null ? source.length : (isLineComment ? match.index : match.index + 2);
+            result += blank(source.slice(index, end));
+            index = end;
+            continue;
+        }
+        result += character;
+        index++;
+    }
+    return result;
+}
+
+function stringEnd(source, openIndex) {
+    const quote = source[openIndex];
+    for (let index = openIndex + 1; index < source.length; index++) {
+        if (source[index] === '\\') {
+            index++;
+        } else if (source[index] === quote) {
+            return index + 1;
+        }
+    }
+    return source.length;
+}
+
+// The top-level arguments of the call whose opening parenthesis ends at openIndex, or null when
+// the call is never closed.
+function callArguments(source, openIndex) {
+    const argumentList = [];
+    let depth = 0;
+    let start = openIndex;
+    for (let index = openIndex; index < source.length; index++) {
+        const character = source[index];
+        if (character === "'" || character === '"') {
+            index = stringEnd(source, index) - 1;
+        } else if ('([{'.includes(character)) {
+            depth++;
+        } else if (depth > 0 && ')]}'.includes(character)) {
+            depth--;
+        } else if (character === ')') {
+            argumentList.push(source.slice(start, index).trim());
+            return argumentList.filter((argument, position) => argument !== '' || position < argumentList.length - 1);
+        } else if (character === ',' && depth === 0) {
+            argumentList.push(source.slice(start, index).trim());
+            start = index + 1;
+        }
+    }
+    return null;
+}
+
 function phpFilesUnder(directory) {
     return readdirSync(directory, { withFileTypes: true }).flatMap((dirent) => {
         const path = join(directory, dirent.name);
@@ -47,21 +127,6 @@ function phpFilesUnder(directory) {
         }
         return dirent.name.endsWith('.php') ? [path] : [];
     });
-}
-
-function argumentsFrom(source, openIndex) {
-    let depth = 1;
-    for (let index = openIndex; index < source.length; index++) {
-        if (source[index] === '(') {
-            depth++;
-        } else if (source[index] === ')') {
-            depth--;
-            if (depth === 0) {
-                return source.slice(openIndex, index);
-            }
-        }
-    }
-    return source.slice(openIndex);
 }
 
 function lineOf(source, index) {
@@ -76,31 +141,54 @@ if (!existsSync(manifestPath)) {
     fail([`${relative(projectRoot, manifestPath)} not found: run this check after the Vite build.`]);
 }
 
-const missingRoots = scan.filter((root) => !existsSync(join(projectRoot, root)));
+const missingRoots = scan.filter((root) => !existsSync(resolve(projectRoot, root)));
 if (missingRoots.length > 0) {
     fail([`Scanned directory not found: ${missingRoots.join(', ')}. Pass the existing ones with --scan.`]);
 }
 
-const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+// A second argument names another build directory, whose manifest sits next to the default one.
+const publicDirectory = dirname(dirname(manifestPath));
+const manifests = new Map([[null, JSON.parse(readFileSync(manifestPath, 'utf8'))]]);
+
+function manifestFor(buildDirectory) {
+    if (!manifests.has(buildDirectory)) {
+        const path = join(publicDirectory, buildDirectory, basename(manifestPath));
+        manifests.set(buildDirectory, existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : undefined);
+    }
+    return manifests.get(buildDirectory);
+}
+
 const references = [];
 const unverifiable = [];
 
-for (const file of scan.flatMap((root) => phpFilesUnder(join(projectRoot, root)))) {
-    const source = readFileSync(file, 'utf8');
+for (const file of scan.flatMap((root) => phpFilesUnder(resolve(projectRoot, root)))) {
+    const source = withoutComments(readFileSync(file, 'utf8'), file.endsWith('.blade.php'));
     for (const call of source.matchAll(CALL_PATTERN)) {
         const location = `${relative(projectRoot, file)}:${lineOf(source, call.index)}`;
-        const callArguments = argumentsFrom(source, call.index + call[0].length);
-        if (!LITERALS_ONLY_PATTERN.test(callArguments)) {
-            unverifiable.push(`${location} ${call[1]}(${callArguments.trim()})`);
+        const argumentList = callArguments(source, call.index + call[0].length);
+        const [entries, buildDirectory] = argumentList ?? [];
+        const buildDirectoryLiteral = buildDirectory === undefined ? undefined : buildDirectory.match(SINGLE_LITERAL_PATTERN);
+        if (
+            argumentList === null
+            || argumentList.length > 2
+            || !LITERALS_ONLY_PATTERN.test(entries)
+            || buildDirectoryLiteral === null
+        ) {
+            const text = argumentList === null ? '…' : argumentList.join(', ');
+            unverifiable.push(`${location} ${call[1]}(${text})`);
             continue;
         }
-        for (const literal of callArguments.matchAll(LITERAL_PATTERN)) {
-            references.push({ location, path: literal[1] ?? literal[2] });
+        const directory = buildDirectoryLiteral === undefined ? null : (buildDirectoryLiteral[1] ?? buildDirectoryLiteral[2]);
+        for (const literal of entries.matchAll(LITERAL_PATTERN)) {
+            references.push({ location, path: literal[1] ?? literal[2], directory });
         }
     }
 }
 
-const missing = references.filter((reference) => manifest[reference.path] === undefined);
+const missing = references.filter((reference) => {
+    const manifest = manifestFor(reference.directory);
+    return manifest === undefined || !Object.hasOwn(manifest, reference.path);
+});
 
 if (unverifiable.length > 0) {
     console.error(`${unverifiable.length} Vite call(s) whose argument is not a hard-coded path:`);
@@ -108,14 +196,15 @@ if (unverifiable.length > 0) {
         console.error(`  - ${call}`);
     }
     console.error('');
-    console.error('This check cannot match such a call against the manifest, nor a second argument');
-    console.error('that would switch to another build directory: write each path literally.');
+    console.error('This check cannot match such a call against the manifest: write each path, and the');
+    console.error('build directory when there is one, literally.');
 }
 
 if (missing.length > 0) {
     console.error(`${missing.length} Vite reference(s) missing from the build manifest:`);
     for (const reference of missing) {
-        console.error(`  - ${reference.location} → ${reference.path}`);
+        const build = reference.directory === null ? '' : ` (build directory ${reference.directory}${manifestFor(reference.directory) === undefined ? ', no manifest' : ''})`;
+        console.error(`  - ${reference.location} → ${reference.path}${build}`);
     }
     console.error('');
     console.error('At render time Laravel throws "Unable to locate file in Vite manifest" and the page answers 500.');
@@ -123,7 +212,7 @@ if (missing.length > 0) {
 }
 
 if (unverifiable.length > 0 || missing.length > 0) {
-    process.exit(1);
+    process.exitCode = 1;
+} else {
+    console.log(`Vite references: ${references.length} hard-coded reference(s), all present in the build manifest.`);
 }
-
-console.log(`Vite references: ${references.length} hard-coded reference(s), all present in the build manifest.`);

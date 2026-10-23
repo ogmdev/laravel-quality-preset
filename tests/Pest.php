@@ -2,7 +2,8 @@
 
 declare(strict_types=1);
 
-afterEach(function (): void {
+// A bare afterEach() here would only apply to tests written in this file.
+pest()->afterEach(function (): void {
     foreach (TemporaryDirectories::$created as $directory) {
         removeDirectory($directory);
     }
@@ -51,9 +52,13 @@ function removeDirectory(string $directory): void
  */
 function run(array $command, string $workingDirectory, array $environment = []): array
 {
+    // Files rather than pipes: a child filling one pipe while the other is read would block both.
+    $stdoutFile = (string) tempnam(sys_get_temp_dir(), 'stdout');
+    $stderrFile = (string) tempnam(sys_get_temp_dir(), 'stderr');
+
     $process = proc_open(
         $command,
-        [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+        [1 => ['file', $stdoutFile, 'w'], 2 => ['file', $stderrFile, 'w']],
         $pipes,
         $workingDirectory,
         [...getenv(), ...$environment],
@@ -63,12 +68,12 @@ function run(array $command, string $workingDirectory, array $environment = []):
         throw new RuntimeException(sprintf('Could not start [%s].', implode(' ', $command)));
     }
 
-    $stdout = (string) stream_get_contents($pipes[1]);
-    $stderr = (string) stream_get_contents($pipes[2]);
-    fclose($pipes[1]);
-    fclose($pipes[2]);
+    $exitCode = proc_close($process);
+    $result = ['exitCode' => $exitCode, 'stdout' => (string) file_get_contents($stdoutFile), 'stderr' => (string) file_get_contents($stderrFile)];
+    unlink($stdoutFile);
+    unlink($stderrFile);
 
-    return ['exitCode' => proc_close($process), 'stdout' => $stdout, 'stderr' => $stderr];
+    return $result;
 }
 
 function temporaryDirectory(string $prefix): string

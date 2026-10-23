@@ -95,3 +95,77 @@ it('fails when a scanned directory does not exist', function (): void {
     expect($result['exitCode'])->toBe(1)
         ->and($result['stderr'])->toContain('Scanned directory not found: modules. Pass the existing ones with --scan.');
 });
+
+it('checks a reference against the manifest of the build directory it names', function (): void {
+    writeJson($this->directory.'/public/build-admin/manifest.json', ['resources/admin/app.js' => ['file' => 'assets/admin.js']]);
+    writeFile($this->directory.'/resources/views/admin.blade.php', "@vite('resources/admin/app.js', 'build-admin')\n@vite(['resources/admin/missing.js'], \"build-admin\")\n");
+    writeFile($this->directory.'/app/Logo.php', "<?php\nreturn Vite::asset('resources/images/logo.svg', 'build-gone');\n");
+
+    $result = assertViteReferencesAreBuilt($this->directory);
+
+    expect($result['exitCode'])->toBe(1)
+        ->and($result['stderr'])->toContain('2 Vite reference(s) missing from the build manifest:')
+        ->toContain('resources/views/admin.blade.php:2 → resources/admin/missing.js (build directory build-admin)')
+        ->toContain('app/Logo.php:2 → resources/images/logo.svg (build directory build-gone, no manifest)')
+        ->not->toContain('→ build-admin');
+});
+
+it('cannot check a build directory that is not hard-coded', function (): void {
+    writeFile($this->directory.'/resources/views/admin.blade.php', "@vite('resources/js/app.js', \$buildDirectory)\n");
+
+    $result = assertViteReferencesAreBuilt($this->directory);
+
+    expect($result['exitCode'])->toBe(1)
+        ->and($result['stderr'])->toContain("resources/views/admin.blade.php:1 @vite('resources/js/app.js', \$buildDirectory)");
+});
+
+it('leaves out the calls that never run', function (): void {
+    writeFile($this->directory.'/resources/views/layout.blade.php', <<<'BLADE'
+        {{-- @vite('resources/js/legacy.js') --}}
+        <code>@@vite('resources/js/doc.js')</code>
+        @verbatim
+            @vite('resources/js/verbatim.js')
+        @endverbatim
+        <a href="https://example.com">@vite('resources/js/app.js')</a>
+        BLADE);
+    writeFile($this->directory.'/app/Legacy.php', <<<'PHP'
+        <?php
+        // return Vite::asset('resources/images/old.svg');
+        # Vite::asset('resources/images/older.svg');
+        /* Vite::content('resources/images/oldest.svg'); */
+        return [MyVite::asset('resources/images/other.svg'), 'not // a comment', Vite::asset('resources/images/logo.svg')];
+        PHP);
+
+    $result = assertViteReferencesAreBuilt($this->directory);
+
+    expect($result['exitCode'])->toBe(0, output($result))
+        ->and($result['stdout'])->toContain('2 hard-coded reference(s)');
+});
+
+it('reads the arguments without being misled by parentheses in strings', function (): void {
+    writeJson($this->directory.'/public/build/manifest.json', ['resources/js/app (v2).js' => ['file' => 'assets/app.js']]);
+    writeFile($this->directory.'/resources/views/layout.blade.php', "@vite(['resources/js/app (v2).js',])\n");
+
+    $result = assertViteReferencesAreBuilt($this->directory);
+
+    expect($result['exitCode'])->toBe(0, output($result))
+        ->and($result['stdout'])->toContain('1 hard-coded reference(s)');
+});
+
+it('does not take an inherited object key for a manifest entry', function (): void {
+    writeFile($this->directory.'/resources/views/layout.blade.php', "@vite('constructor')\n@vite('__proto__')\n");
+
+    $result = assertViteReferencesAreBuilt($this->directory);
+
+    expect($result['exitCode'])->toBe(1)
+        ->and($result['stderr'])->toContain('2 Vite reference(s) missing from the build manifest:');
+});
+
+it('scans a directory given as an absolute path', function (): void {
+    writeFile($this->directory.'/modules/Admin/layout.blade.php', "@vite('resources/js/app.js')\n");
+
+    $result = assertViteReferencesAreBuilt($this->directory, ['--scan='.$this->directory.'/modules']);
+
+    expect($result['exitCode'])->toBe(0, output($result))
+        ->and($result['stdout'])->toContain('1 hard-coded reference(s)');
+});

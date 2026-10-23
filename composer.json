@@ -6,10 +6,10 @@
     "keywords": ["laravel", "phpstan", "rector", "pint", "quality", "ci", "licenses", "osv-scanner", "vite"],
     "require": {
         "php": "^8.4",
-        "driftingly/rector-laravel": "^2.1",
+        "driftingly/rector-laravel": "^2.6",
         "laravel/pint": "^1.22",
         "phpstan/phpstan": "^2.1",
-        "rector/rector": "^2.2"
+        "rector/rector": "^2.6"
     },
     "require-dev": {
         "pestphp/pest": "^5.0",

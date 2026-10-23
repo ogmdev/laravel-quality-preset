@@ -11,6 +11,11 @@ jobs:
     strategy:
       matrix:
         php: ['8.4', '8.5']
+        dependencies: [highest]
+        include:
+          # The lowest versions the constraints allow, so that a too low bound shows up here.
+          - php: '8.4'
+            dependencies: lowest
     steps:
       - uses: actions/checkout@v4
       - uses: shivammathur/setup-php@v2
@@ -21,8 +26,12 @@ jobs:
         with:
           node-version: lts/*
       - run: composer validate --strict
-      - run: composer install --no-interaction --no-progress
-      - run: composer pint
-      - run: composer phpstan
-      - run: composer rector
+      - run: composer update --no-interaction --no-progress ${{ matrix.dependencies == 'lowest' && '--prefer-lowest --prefer-stable' || '' }}
+      # The package's own Pint, PHPStan and Rector configs target the latest tool versions.
+      - if: matrix.dependencies == 'highest'
+        run: composer pint
+      - if: matrix.dependencies == 'highest'
+        run: composer phpstan
+      - if: matrix.dependencies == 'highest'
+        run: composer rector
       - run: composer test
